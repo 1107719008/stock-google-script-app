@@ -4,13 +4,21 @@
 
 // ⚠️ 設定區：請務必填寫您的 FinMind API 金鑰
 // 如果您沒有金鑰，請留空 ("")，但數據穩定性會降低。
-const FINMIND_TOKEN = "YOUR_FINMIND_API_KEY_HERE"; 
+const FINMIND_TOKEN = getMyUserToken();
 
 // 🎯 設定區：要查詢的股票代號 (上市 TWSE) - 此為首次運行或清單為空時的預設值
 const STOCK_CODES_DEFAULT = ["2330"];
 
 // 🎯 設定區：查詢過去多少天的數據
 const DAYS_TO_FETCH = 5; 
+
+//get token from 外部
+function getMyUserToken() {
+  // 取得使用者屬性服務實例
+  const properties = PropertiesService.getUserProperties();
+  const userToken = properties.getProperty('FINMIND_API_TOKEN');
+  return userToken;
+}
 
 // =================================================================
 // 輔助函數

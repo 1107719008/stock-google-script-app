@@ -8,3 +8,6 @@
 
 ## 專案使用方法
 直接在主分頁填寫股票代號，並按 UPDATE 按鈕進行更新資料。
+
+### 主要使用的 script
+finmindjuridicalperson.gs : 主要用於撈取法人資料並進行分析標示
