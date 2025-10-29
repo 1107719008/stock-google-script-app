@@ -554,6 +554,193 @@ function getStockCodesFromSheet(summarySheet, defaultCodes) {
     return codes;
 }
 
+/**
+ * 🎯 新增函數：抓取 FinMind 過去 DAYS_TO_FETCH 天的股票價格數據 (開盤、收盤、高點、低點)。
+ * @param {string} code 股票代號 (e.g., "2330")
+ * @returns {object} { 'YYYY-MM-DD': { open: number, close: number, high: number, low: number }, ... }
+ */
+function fetchFinMindStockPrice(code) {
+    const startDate = getPastDate(DAYS_TO_FETCH); 
+    const endDate = getTodayDate(); 
+    
+    // 使用 TaiwanStockPrice 資料集
+    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${code}&start_date=${startDate}&end_date=${endDate}`;
+    
+    Logger.log(`[查詢] 股價數據 - 股票代碼: ${code}, 查詢區間: ${startDate} 至 ${endDate}`);
+
+    const options = {
+        'method': 'get',
+        'muteHttpExceptions': true
+    };
+
+    if (FINMIND_TOKEN) {
+        options.headers = {
+            "Authorization": "Bearer " + FINMIND_TOKEN
+        };
+    }
+    
+    try {
+        const res = UrlFetchApp.fetch(url, options);
+        
+        if (res.getResponseCode() !== 200) {
+            Logger.log(`[失敗] FinMind API 呼叫股價數據失敗(${code})，狀態碼: ${res.getResponseCode()}`);
+            return {};
+        }
+
+        const json = JSON.parse(res.getContentText());
+        
+        if (json.status !== 200) {
+             Logger.log(`[失敗] 股價數據 API 回傳非 200 狀態，代碼: ${json.status}，訊息: ${json.msg}`);
+             return {};
+        }
+
+        const priceMap = {};
+        if (json.data) {
+            json.data.forEach(item => {
+                // FinMind 使用 max/min
+                if (item.date && item.open && item.max && item.min && item.close) {
+                    priceMap[item.date] = {
+                        open: item.open,
+                        close: item.close,
+                        high: item.max, 
+                        low: item.min,  
+                    };
+                }
+            });
+        }
+        return priceMap;
+        
+    } catch (e) {
+        Logger.log(`[錯誤] 抓取 ${code} 股價數據時發生例外: ${e.message}`);
+        return {};
+    }
+}
+
+// -----------------------------------------------------------------
+// 歷史紀錄標頭更新函數 (M-P 欄位)
+// -----------------------------------------------------------------
+
+/**
+ * 🎯 確保歷史紀錄分頁的標頭有 M, N, O, P 欄位。
+ */
+function updateHistoricalHeaderColumns() {
+    Logger.log("--- 程式開始執行：更新歷史紀錄分頁標頭 ---");
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const historicalSheet = ss.getSheetByName("TWSE 法人買賣超歷史紀錄");
+
+    if (!historicalSheet) {
+        Logger.log("錯誤：找不到歷史紀錄分頁。");
+        return;
+    }
+
+    const priceHeaderMtoP = [ "開盤價", "收盤價", "最高價", "最低價" ];
+    
+    // 檢查 M1 欄位是否為 "開盤價" (即檢查 M-P 是否已存在)
+    const m1Value = historicalSheet.getRange('M1').getValue();
+
+    if (m1Value !== priceHeaderMtoP[0]) {
+        Logger.log("偵測到 M-P 欄位標頭缺失或不匹配，正在更新...");
+        
+        // 假設 A-L 欄已經存在 (共 12 欄)，從第 13 欄 (M) 開始寫入
+        const startCol = 13; 
+        const startRow = 1;
+        
+        historicalSheet.getRange(startRow, startCol, 1, priceHeaderMtoP.length).setValues([priceHeaderMtoP]);
+        Logger.log("歷史紀錄分頁 M-P 欄位標頭已更新。");
+    } else {
+        Logger.log("歷史紀錄分頁 M-P 欄位標頭已存在，無須更新。");
+    }
+    
+    Logger.log("--- 程式執行結束：更新歷史紀錄分頁標頭 ---");
+}
+
+/**
+ * 🎯 新增函數：獨立抓取歷史股價數據並更新 M, N, O, P 欄位。
+ * 此函數不影響 A-L 的法人數據。
+ */
+function updateHistoricalPrices() {
+    Logger.log("--- 程式開始執行：更新歷史紀錄分頁價格數據 (M-P) ---");
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const historicalSheet = ss.getSheetByName("TWSE 法人買賣超歷史紀錄");
+    const summarySheet = ss.getSheetByName("個股法人買賣超總計"); // 需要此頁面來獲取代碼清單
+
+    if (!historicalSheet || !summarySheet) {
+        Logger.log("錯誤：找不到總結或歷史紀錄分頁。無法更新價格數據。");
+        Browser.msgBox("錯誤：請確保「個股法人買賣超總計」與「TWSE 法人買賣超歷史紀錄」分頁存在。");
+        return;
+    }
+    
+    // 1. 確保 M-P 欄位標頭存在
+    updateHistoricalHeaderColumns();
+
+    // 2. 獲取所有需要查詢的股票代碼
+    const CODES_TO_FETCH = getStockCodesFromSheet(summarySheet, STOCK_CODES_DEFAULT); 
+    
+    // 3. 抓取所有股票的價格數據
+    const allPriceData = {}; // { '2330': { '2025-01-01': { open: 1, close: 2, ... } } }
+    
+    for (const code of CODES_TO_FETCH) {
+        Logger.log(`---> 正在抓取 ${code} 的股價數據...`);
+        allPriceData[code] = fetchFinMindStockPrice(code);
+        Utilities.sleep(500); // 避免 API 頻率限制
+    }
+    
+    // 4. 讀取歷史紀錄分頁的資料 (只需要 A, B 欄和 M-P 欄位)
+    const lastHistoricalRow = historicalSheet.getLastRow();
+    if (lastHistoricalRow < 2) {
+        Logger.log("歷史數據為空，無法更新價格。");
+        return;
+    }
+    
+    // 讀取 A:B (日期, 代碼) 和 M:P (價格) 欄位的數據
+    // 讀取範圍為 16 欄，確保讀取到 M-P 欄位
+    const historicalData = historicalSheet.getRange(2, 1, lastHistoricalRow - 1, 16).getValues(); 
+
+    let updateCount = 0;
+    
+    // 5. 遍歷歷史數據，將價格數據覆蓋到 M, N, O, P 欄位
+    historicalData.forEach(row => {
+        // A 欄 (索引 0): 日期; B 欄 (索引 1): 股票代碼
+        const dateKey = Utilities.formatDate(new Date(row[0]), Session.getScriptTimeZone(), "yyyy-MM-dd");
+        const code = String(row[1]).trim();
+        
+        const stockPrices = allPriceData[code];
+        
+        if (stockPrices) {
+            const price = stockPrices[dateKey];
+            
+            if (price) {
+                // M, N, O, P 欄位的索引分別是 12, 13, 14, 15
+                // 檢查 M 欄 (索引 12) 是否已更新，避免重複寫入
+                if (row[12] === "" || row[12] === null || row[12] !== price.open) { 
+                    row[12] = price.open;  // M: 開盤價
+                    row[13] = price.close; // N: 收盤價
+                    row[14] = price.high;  // O: 最高價
+                    row[15] = price.low;   // P: 最低價
+                    updateCount++;
+                }
+            } else {
+                 // 該交易日沒有價格數據，填入空值（如果之前有價格，則清除）
+                 row[12] = ""; 
+                 row[13] = ""; 
+                 row[14] = ""; 
+                 row[15] = ""; 
+            }
+        }
+    });
+
+    // 6. 一次性寫回更新後的價格數據 (從 A2 開始，寫入 16 欄)
+    if (historicalData.length > 0) {
+        // 寫入範圍為從 A2 到 P[LastRow]
+        historicalSheet.getRange(2, 1, historicalData.length, historicalData[0].length).setValues(historicalData);
+        Logger.log(`價格數據更新完成！共更新/檢查 ${updateCount} 筆交易日的價格資訊。`);
+    }
+
+    Browser.msgBox("歷史股價數據 (M-P 欄位) 更新完成！");
+    Logger.log("--- 程式執行結束：更新歷史紀錄分頁價格數據 ---");
+}
+
+
 // =================================================================
 // 主控函數：將結果寫入 Google Sheet (新增連續買超邏輯)
 // =================================================================
@@ -561,6 +748,8 @@ function getStockCodesFromSheet(summarySheet, defaultCodes) {
 function runAllCode(){
     Logger.log("------runnning code start")
     updateInstitutionalDataSheet();
+
+    updateHistoricalPrices();
 
     Logger.log("--- 執行 runCode 函數結束 ---");
 }
@@ -826,7 +1015,8 @@ function updateInstitutionalDataSheet() {
     // =================================================================
     applyMomentumFormatting();
     // =================================================================
-    applyMomentumAndSummaryColoring(); // 總結分頁 A, C, D, E 欄動量標註
+    applyMomentumAndSummaryColoring();
+
 
     Browser.msgBox(`數據更新完成！已更新歷史紀錄 (${historicalSheetName}) 和總結 (${summarySheetName}) 兩個分頁。\n\n股票代碼已從「個股法人買賣超總計」分頁的 A 欄讀取。`);
     Logger.log("--- 程式執行結束 ---");
